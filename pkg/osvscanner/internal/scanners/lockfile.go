@@ -10,10 +10,10 @@ import (
 	"github.com/google/osv-scalibr/extractor/filesystem"
 	"github.com/google/osv-scalibr/extractor/filesystem/os/apk"
 	"github.com/google/osv-scalibr/extractor/filesystem/os/dpkg"
-	"github.com/google/osv-scanner/internal/output"
-	"github.com/google/osv-scanner/internal/scalibrextract"
-	"github.com/google/osv-scanner/internal/scalibrextract/language/osv/osvscannerjson"
-	"github.com/google/osv-scanner/pkg/reporter"
+	"github.com/google/osv-scanner/v2/internal/output"
+	"github.com/google/osv-scanner/v2/internal/scalibrextract"
+	"github.com/google/osv-scanner/v2/internal/scalibrextract/language/osv/osvscannerjson"
+	"github.com/google/osv-scanner/v2/pkg/reporter"
 )
 
 var lockfileExtractorMapping = map[string]string{
@@ -31,14 +31,19 @@ var lockfileExtractorMapping = map[string]string{
 	"Pipfile.lock":                "python/Pipfilelock",
 	"pdm.lock":                    "python/pdmlock",
 	"requirements.txt":            "python/requirements",
+	"uv.lock":                     "python/uvlock",
 	"Cargo.lock":                  "rust/Cargolock",
 	"composer.lock":               "php/composerlock",
 	"mix.lock":                    "erlang/mixlock",
 	"renv.lock":                   "r/renvlock",
+	"deps.json":                   "dotnet/depsjson",
 	"packages.lock.json":          "dotnet/packageslockjson",
 	"conan.lock":                  "cpp/conanlock",
 	"go.mod":                      "go/gomod",
 	"Gemfile.lock":                "ruby/gemfilelock",
+	"cabal.project.freeze":        "haskell/cabal",
+	"stack.yaml.lock":             "haskell/stacklock",
+	// "Package.resolved":            "swift/packageresolved",
 }
 
 // ScanSingleFile is similar to ScanSingleFileWithMapping, just without supporting the <lockfileformat>:/path/to/lockfile prefix identifier

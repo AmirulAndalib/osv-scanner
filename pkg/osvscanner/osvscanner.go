@@ -4,24 +4,32 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"os"
+	"strings"
 	"time"
 
+	scalibr "github.com/google/osv-scalibr"
+	"github.com/google/osv-scalibr/artifact/image/layerscanning/image"
 	"github.com/google/osv-scalibr/extractor"
-	"github.com/google/osv-scanner/internal/clients/clientimpl/licensematcher"
-	"github.com/google/osv-scanner/internal/clients/clientimpl/localmatcher"
-	"github.com/google/osv-scanner/internal/clients/clientimpl/osvmatcher"
-	"github.com/google/osv-scanner/internal/clients/clientinterfaces"
-	"github.com/google/osv-scanner/internal/config"
-	"github.com/google/osv-scanner/internal/depsdev"
-	"github.com/google/osv-scanner/internal/imodels"
-	"github.com/google/osv-scanner/internal/imodels/results"
-	"github.com/google/osv-scanner/internal/osvdev"
-	"github.com/google/osv-scanner/internal/output"
-	"github.com/google/osv-scanner/internal/resolution/client"
-	"github.com/google/osv-scanner/internal/resolution/datasource"
-	"github.com/google/osv-scanner/internal/version"
-	"github.com/google/osv-scanner/pkg/models"
-	"github.com/google/osv-scanner/pkg/reporter"
+	"github.com/google/osv-scanner/v2/internal/clients/clientimpl/baseimagematcher"
+	"github.com/google/osv-scanner/v2/internal/clients/clientimpl/licensematcher"
+	"github.com/google/osv-scanner/v2/internal/clients/clientimpl/localmatcher"
+	"github.com/google/osv-scanner/v2/internal/clients/clientimpl/osvmatcher"
+	"github.com/google/osv-scanner/v2/internal/clients/clientinterfaces"
+	"github.com/google/osv-scanner/v2/internal/config"
+	"github.com/google/osv-scanner/v2/internal/datasource"
+	"github.com/google/osv-scanner/v2/internal/depsdev"
+	"github.com/google/osv-scanner/v2/internal/imodels"
+	"github.com/google/osv-scanner/v2/internal/imodels/results"
+	"github.com/google/osv-scanner/v2/internal/osvdev"
+	"github.com/google/osv-scanner/v2/internal/output"
+	"github.com/google/osv-scanner/v2/internal/resolution/client"
+	"github.com/google/osv-scanner/v2/internal/version"
+	"github.com/google/osv-scanner/v2/pkg/models"
+	"github.com/google/osv-scanner/v2/pkg/osvscanner/internal/imagehelpers"
+	"github.com/google/osv-scanner/v2/pkg/osvscanner/internal/scanners"
+	"github.com/google/osv-scanner/v2/pkg/reporter"
 	"github.com/ossf/osv-schema/bindings/go/osvschema"
 )
 
@@ -33,7 +41,8 @@ type ScannerActions struct {
 	Recursive          bool
 	SkipGit            bool
 	NoIgnore           bool
-	DockerImageName    string
+	Image              string
+	IsImageArchive     bool
 	ConfigOverridePath string
 	CallAnalysisStates map[string]bool
 
@@ -46,7 +55,6 @@ type ExperimentalScannerActions struct {
 	ShowAllPackages       bool
 	ScanLicensesSummary   bool
 	ScanLicensesAllowlist []string
-	ScanOCIImage          string
 
 	LocalDBPath string
 	TransitiveScanningActions
@@ -60,8 +68,9 @@ type TransitiveScanningActions struct {
 
 type ExternalAccessors struct {
 	// Matchers
-	VulnMatcher    clientinterfaces.VulnerabilityMatcher
-	LicenseMatcher clientinterfaces.LicenseMatcher
+	VulnMatcher      clientinterfaces.VulnerabilityMatcher
+	LicenseMatcher   clientinterfaces.LicenseMatcher
+	BaseImageMatcher clientinterfaces.BaseImageMatcher
 
 	// Required for pomxmlnet Extractor
 	MavenRegistryAPIClient *datasource.MavenRegistryAPIClient
@@ -82,6 +91,7 @@ var ErrNoPackagesFound = errors.New("no packages found in scan")
 var ErrVulnerabilitiesFound = errors.New("vulnerabilities found")
 
 // ErrAPIFailed describes errors related to querying API endpoints.
+// TODO(v2): Actually use this error
 var ErrAPIFailed = errors.New("API query failed")
 
 func initializeExternalAccessors(r reporter.Reporter, actions ScannerActions) (ExternalAccessors, error) {
@@ -112,13 +122,22 @@ func initializeExternalAccessors(r reporter.Reporter, actions ScannerActions) (E
 
 	// --- License Matcher ---
 	if len(actions.ScanLicensesAllowlist) > 0 || actions.ScanLicensesSummary {
-		depsDevAPIClient, err := datasource.NewDepsDevAPIClient(depsdev.DepsdevAPI, "osv-scanner_scan/"+version.OSVVersion)
+		depsDevAPIClient, err := datasource.NewCachedInsightsClient(depsdev.DepsdevAPI, "osv-scanner_scan/"+version.OSVVersion)
 		if err != nil {
 			return ExternalAccessors{}, err
 		}
 
 		externalAccessors.LicenseMatcher = &licensematcher.DepsDevLicenseMatcher{
 			Client: depsDevAPIClient,
+		}
+	}
+
+	// --- Base Image Matcher ---
+	if actions.Image != "" {
+		externalAccessors.BaseImageMatcher = &baseimagematcher.DepsDevBaseImageMatcher{
+			HTTPClient: *http.DefaultClient,
+			Config:     baseimagematcher.DefaultConfig(),
+			Reporter:   r,
 		}
 	}
 
@@ -238,11 +257,138 @@ func DoScan(actions ScannerActions, r reporter.Reporter) (models.VulnerabilityRe
 		)
 	}
 
-	if len(results.Results) > 0 {
-		// Determine the correct error to return.
+	return results, determineReturnErr(results)
+}
 
-		// TODO(v2): in the next breaking release of osv-scanner, consider
-		// returning a ScanError instead of an error.
+func DoContainerScan(actions ScannerActions, r reporter.Reporter) (models.VulnerabilityResults, error) {
+	if r == nil {
+		r = &reporter.VoidReporter{}
+	}
+
+	scanResult := results.ScanResults{
+		ConfigManager: config.Manager{
+			DefaultConfig: config.Config{},
+			ConfigMap:     make(map[string]config.Config),
+		},
+	}
+
+	if actions.ConfigOverridePath != "" {
+		err := scanResult.ConfigManager.UseOverride(r, actions.ConfigOverridePath)
+		if err != nil {
+			r.Errorf("Failed to read config file: %s\n", err)
+			return models.VulnerabilityResults{}, err
+		}
+	}
+
+	// --- Setup Accessors/Clients ---
+	accessors, err := initializeExternalAccessors(r, actions)
+	if err != nil {
+		return models.VulnerabilityResults{}, fmt.Errorf("failed to initialize accessors: %w", err)
+	}
+
+	// --- Initialize Image To Scan ---'
+
+	var img *image.Image
+	if actions.IsImageArchive {
+		r.Infof("Scanning local image tarball %q\n", actions.Image)
+		img, err = image.FromTarball(actions.Image, image.DefaultConfig())
+	} else if actions.Image != "" {
+		path, exportErr := imagehelpers.ExportDockerImage(r, actions.Image)
+		if exportErr != nil {
+			return models.VulnerabilityResults{}, exportErr
+		}
+		defer os.Remove(path)
+
+		img, err = image.FromTarball(path, image.DefaultConfig())
+		r.Infof("Scanning image %q\n", actions.Image)
+	}
+	if err != nil {
+		return models.VulnerabilityResults{}, err
+	}
+
+	defer func() {
+		err := img.CleanUp()
+		if err != nil {
+			r.Errorf("Failed to clean up image: %s\n", err)
+		}
+	}()
+
+	// --- Do Scalibr Scan ---
+	scanner := scalibr.New()
+	scalibrSR, err := scanner.ScanContainer(context.Background(), img, &scalibr.ScanConfig{
+		FilesystemExtractors: scanners.BuildArtifactExtractors(),
+	})
+	if err != nil {
+		return models.VulnerabilityResults{}, fmt.Errorf("failed to scan container image: %w", err)
+	}
+
+	if len(scalibrSR.Inventories) == 0 {
+		return models.VulnerabilityResults{}, ErrNoPackagesFound
+	}
+
+	// --- Save Scalibr Scan Results ---
+	scanResult.PackageScanResults = make([]imodels.PackageScanResult, len(scalibrSR.Inventories))
+	for i, inv := range scalibrSR.Inventories {
+		scanResult.PackageScanResults[i].PackageInfo = imodels.FromInventory(inv)
+		scanResult.PackageScanResults[i].LayerDetails = inv.LayerDetails
+	}
+
+	// --- Fill Image Metadata ---
+	scanResult.ImageMetadata, err = imagehelpers.BuildImageMetadata(img, accessors.BaseImageMatcher)
+	if err != nil { // Not getting image metadata is not fatal
+		r.Errorf("Failed to fully get image metadata: %v", err)
+	}
+
+	// ----- Filtering -----
+	filterUnscannablePackages(r, &scanResult)
+
+	filterNonContainerRelevantPackages(r, &scanResult)
+
+	// --- Make Vulnerability Requests ---
+	if accessors.VulnMatcher != nil {
+		err = makeVulnRequestWithMatcher(r, scanResult.PackageScanResults, accessors.VulnMatcher)
+		if err != nil {
+			return models.VulnerabilityResults{}, err
+		}
+	}
+
+	// --- Make License Requests ---
+	if accessors.LicenseMatcher != nil {
+		err = accessors.LicenseMatcher.MatchLicenses(context.Background(), scanResult.PackageScanResults)
+		if err != nil {
+			return models.VulnerabilityResults{}, err
+		}
+	}
+
+	// TODO: This is a set of heuristics,
+	//    - Assume that packages under usr/ might be a OS package depending on ecosystem
+	//    - Assume python packages under dist-packages is a OS package
+	// Replace this with an actual implementation in OSV-Scalibr (potentially via full filesystem accountability).
+	for _, psr := range scanResult.PackageScanResults {
+		if (strings.HasPrefix(psr.PackageInfo.Location(), "usr/") && psr.PackageInfo.Ecosystem().Ecosystem == osvschema.EcosystemGo) ||
+			strings.Contains(psr.PackageInfo.Location(), "dist-packages/") && psr.PackageInfo.Ecosystem().Ecosystem == osvschema.EcosystemPyPI {
+			psr.PackageInfo.Annotations = append(psr.PackageInfo.Annotations, extractor.InsideOSPackage)
+		}
+	}
+
+	results := buildVulnerabilityResults(r, actions, &scanResult)
+
+	filtered := filterResults(r, &results, &scanResult.ConfigManager, actions.ShowAllPackages)
+	if filtered > 0 {
+		r.Infof(
+			"Filtered %d %s from output\n",
+			filtered,
+			output.Form(filtered, "vulnerability", "vulnerabilities"),
+		)
+	}
+
+	return results, determineReturnErr(results)
+}
+
+// determineReturnErr determines whether we found a "vulnerability" or not,
+// and therefore whether we should return a ErrVulnerabilityFound error.
+func determineReturnErr(results models.VulnerabilityResults) error {
+	if len(results.Results) > 0 {
 		var vuln bool
 		onlyUncalledVuln := true
 		var licenseViolation bool
@@ -258,17 +404,16 @@ func DoScan(actions ScannerActions, r reporter.Reporter) (models.VulnerabilityRe
 			}
 		}
 		onlyUncalledVuln = onlyUncalledVuln && vuln
-		licenseViolation = licenseViolation && len(actions.ScanLicensesAllowlist) > 0
 
 		if (!vuln || onlyUncalledVuln) && !licenseViolation {
 			// There is no error.
-			return results, nil
+			return nil
 		}
 
-		return results, ErrVulnerabilitiesFound
+		return ErrVulnerabilitiesFound
 	}
 
-	return results, nil
+	return nil
 }
 
 // TODO(V2): Add context

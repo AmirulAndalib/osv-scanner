@@ -8,22 +8,16 @@ import (
 	"deps.dev/util/resolve"
 	"deps.dev/util/resolve/dep"
 	"deps.dev/util/semver"
-	"github.com/google/osv-scanner/internal/depsdev"
-	"github.com/google/osv-scanner/pkg/models"
-	"github.com/google/osv-scanner/pkg/osv"
+	"github.com/google/osv-scanner/v2/internal/clients/clientinterfaces"
+	"github.com/google/osv-scanner/v2/internal/depsdev"
+	"github.com/google/osv-scanner/v2/pkg/osv"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
 type ResolutionClient struct {
 	DependencyClient
-	VulnerabilityClient
-}
-
-type VulnerabilityClient interface {
-	// FindVulns finds the vulnerabilities affecting each of Nodes in the graph.
-	// The returned Vulnerabilities[i] corresponds to the vulnerabilities in g.Nodes[i].
-	FindVulns(g *resolve.Graph) ([]models.Vulnerabilities, error)
+	clientinterfaces.VulnerabilityMatcher
 }
 
 type DependencyClient interface {

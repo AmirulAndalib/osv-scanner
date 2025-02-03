@@ -4,20 +4,28 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"deps.dev/util/resolve"
-	"github.com/google/osv-scanner/internal/depsdev"
-	"github.com/google/osv-scanner/internal/remediation"
-	"github.com/google/osv-scanner/internal/remediation/upgrade"
-	"github.com/google/osv-scanner/internal/resolution"
-	"github.com/google/osv-scanner/internal/resolution/client"
-	"github.com/google/osv-scanner/internal/resolution/lockfile"
-	"github.com/google/osv-scanner/internal/resolution/manifest"
-	"github.com/google/osv-scanner/internal/version"
-	"github.com/google/osv-scanner/pkg/reporter"
+	"github.com/google/osv-scanner/v2/internal/clients/clientimpl/localmatcher"
+	"github.com/google/osv-scanner/v2/internal/clients/clientimpl/osvmatcher"
+	"github.com/google/osv-scanner/v2/internal/depsdev"
+	"github.com/google/osv-scanner/v2/internal/imodels/ecosystem"
+	"github.com/google/osv-scanner/v2/internal/osvdev"
+	"github.com/google/osv-scanner/v2/internal/remediation"
+	"github.com/google/osv-scanner/v2/internal/remediation/upgrade"
+	"github.com/google/osv-scanner/v2/internal/resolution"
+	"github.com/google/osv-scanner/v2/internal/resolution/client"
+	"github.com/google/osv-scanner/v2/internal/resolution/lockfile"
+	"github.com/google/osv-scanner/v2/internal/resolution/manifest"
+	"github.com/google/osv-scanner/v2/internal/resolution/util"
+	"github.com/google/osv-scanner/v2/internal/version"
+	"github.com/google/osv-scanner/v2/pkg/reporter"
+	"github.com/ossf/osv-schema/bindings/go/osvschema"
 	"github.com/urfave/cli/v2"
 	"golang.org/x/term"
 )
@@ -40,12 +48,12 @@ const (
 
 type osvFixOptions struct {
 	remediation.Options
-	Client     client.ResolutionClient
-	Manifest   string
-	ManifestRW manifest.ReadWriter
-	Lockfile   string
-	LockfileRW lockfile.ReadWriter
-	RelockCmd  string
+	Client      client.ResolutionClient
+	Manifest    string
+	ManifestRW  manifest.ReadWriter
+	Lockfile    string
+	LockfileRW  lockfile.ReadWriter
+	NoIntroduce bool
 }
 
 func Command(stdout, stderr io.Writer, r *reporter.Reporter) *cli.Command {
@@ -81,10 +89,6 @@ func Command(stdout, stderr io.Writer, r *reporter.Reporter) *cli.Command {
 			&cli.StringFlag{
 				Name:  "maven-registry",
 				Usage: "URL of the default Maven registry to fetch metadata",
-			},
-			&cli.StringFlag{
-				Name:  "relock-cmd",
-				Usage: "command to run to regenerate lockfile on disk after changing the manifest",
 			},
 
 			&cli.BoolFlag{
@@ -141,6 +145,11 @@ func Command(stdout, stderr io.Writer, r *reporter.Reporter) *cli.Command {
 				Name:     "apply-top",
 				Usage:    "apply the top N patches",
 				Value:    -1,
+			},
+			&cli.BoolFlag{
+				Category: autoModeCategory,
+				Name:     "no-introduce",
+				Usage:    "exclude patches that would introduce new vulnerabilities",
 			},
 
 			&cli.StringSliceFlag{
@@ -303,9 +312,9 @@ func action(ctx *cli.Context, stdout, stderr io.Writer) (reporter.Reporter, erro
 			MaxDepth:      ctx.Int("max-depth"),
 			UpgradeConfig: parseUpgradeConfig(ctx, r),
 		},
-		Manifest:  ctx.String("manifest"),
-		Lockfile:  ctx.String("lockfile"),
-		RelockCmd: ctx.String("relock-cmd"),
+		Manifest:    ctx.String("manifest"),
+		Lockfile:    ctx.String("lockfile"),
+		NoIntroduce: ctx.Bool("no-introduce"),
 	}
 
 	system := resolve.UnknownSystem
@@ -364,18 +373,39 @@ func action(ctx *cli.Context, stdout, stderr io.Writer) (reporter.Reporter, erro
 		}
 	}
 
+	userAgent := "osv-scanner_fix/" + version.OSVVersion
 	if ctx.Bool("experimental-offline-vulnerabilities") {
-		var err error
-		opts.Client.VulnerabilityClient, err = client.NewOSVOfflineClient(
+		matcher, err := localmatcher.NewLocalMatcher(
 			r,
-			system,
+			ctx.String("experimental-local-db-path"),
+			userAgent,
 			ctx.Bool("experimental-download-offline-databases"),
-			ctx.String("experimental-local-db-path"))
+		)
 		if err != nil {
 			return nil, err
 		}
+
+		eco, ok := util.OSVEcosystem[system]
+		if !ok {
+			// Something's very wrong if we hit this
+			panic("unhandled resolve.Ecosystem: " + system.String())
+		}
+		if err := matcher.LoadEcosystem(ctx.Context, ecosystem.Parsed{Ecosystem: osvschema.Ecosystem(eco)}); err != nil {
+			return nil, err
+		}
+
+		opts.Client.VulnerabilityMatcher = matcher
 	} else {
-		opts.Client.VulnerabilityClient = client.NewOSVClient()
+		config := osvdev.DefaultConfig()
+		config.UserAgent = userAgent
+		opts.Client.VulnerabilityMatcher = &osvmatcher.CachedOSVMatcher{
+			Client: osvdev.OSVClient{
+				HTTPClient:  http.DefaultClient,
+				Config:      config,
+				BaseHostURL: osvdev.DefaultBaseURL,
+			},
+			InitialQueryTimeout: 5 * time.Minute,
+		}
 	}
 
 	if !ctx.Bool("non-interactive") {

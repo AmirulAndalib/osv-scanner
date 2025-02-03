@@ -9,14 +9,14 @@ import (
 
 	"deps.dev/util/resolve"
 	"deps.dev/util/resolve/dep"
-	"github.com/google/osv-scanner/internal/remediation"
-	"github.com/google/osv-scanner/internal/resolution"
-	"github.com/google/osv-scanner/internal/resolution/client"
-	"github.com/google/osv-scanner/internal/resolution/datasource"
-	lf "github.com/google/osv-scanner/internal/resolution/lockfile"
-	"github.com/google/osv-scanner/internal/resolution/manifest"
-	"github.com/google/osv-scanner/internal/resolution/util"
-	"github.com/google/osv-scanner/pkg/lockfile"
+	"github.com/google/osv-scanner/v2/internal/datasource"
+	"github.com/google/osv-scanner/v2/internal/remediation"
+	"github.com/google/osv-scanner/v2/internal/resolution"
+	"github.com/google/osv-scanner/v2/internal/resolution/client"
+	lf "github.com/google/osv-scanner/v2/internal/resolution/lockfile"
+	"github.com/google/osv-scanner/v2/internal/resolution/manifest"
+	"github.com/google/osv-scanner/v2/internal/resolution/util"
+	"github.com/google/osv-scanner/v2/pkg/lockfile"
 	"golang.org/x/exp/maps"
 )
 
@@ -156,6 +156,10 @@ func autoRelax(ctx context.Context, r *outputReporter, opts osvFixOptions, maxUp
 		return err
 	}
 
+	if opts.NoIntroduce {
+		allPatches = removeVulnIntroducingPatches(allPatches)
+	}
+
 	populateResultVulns(&outputResult, res, allPatches)
 
 	if err := opts.Client.WriteCache(manif.FilePath); err != nil {
@@ -178,7 +182,7 @@ func autoRelax(ctx context.Context, r *outputReporter, opts osvFixOptions, maxUp
 		return err
 	}
 
-	if opts.Lockfile != "" || opts.RelockCmd != "" {
+	if opts.Lockfile != "" {
 		// We only recreate the lockfile if we know a lockfile already exists
 		// or we've been given a command to run.
 		r.Infof("Shelling out to regenerate lockfile...\n")
@@ -194,9 +198,7 @@ func autoRelax(ctx context.Context, r *outputReporter, opts osvFixOptions, maxUp
 		if err == nil {
 			return nil
 		}
-		if opts.RelockCmd != "" {
-			return err
-		}
+
 		r.Warnf("Install failed. Trying again with `--legacy-peer-deps`...\n")
 		cmd, err = regenerateLockfileCmd(opts)
 		if err != nil {
@@ -310,6 +312,10 @@ func autoOverride(ctx context.Context, r *outputReporter, opts osvFixOptions, ma
 		return err
 	}
 
+	if opts.NoIntroduce {
+		allPatches = removeVulnIntroducingPatches(allPatches)
+	}
+
 	populateResultVulns(&outputResult, res, allPatches)
 
 	if err := opts.Client.WriteCache(manif.FilePath); err != nil {
@@ -412,8 +418,8 @@ func makeResultVuln(vuln resolution.Vulnerability) vulnOutput {
 	}
 
 	affected := make(map[packageOutput]struct{})
-	for _, c := range append(vuln.ProblemChains, vuln.NonProblemChains...) {
-		vk, _ := c.End()
+	for _, sg := range vuln.Subgraphs {
+		vk := sg.Nodes[sg.Dependency].Version
 		affected[packageOutput{Name: vk.Name, Version: vk.Version}] = struct{}{}
 	}
 	v.Packages = maps.Keys(affected)
@@ -466,4 +472,8 @@ func populateResultVulns(outputResult *fixOutput, res *resolution.Result, allPat
 
 	outputResult.Vulnerabilities = maps.Values(vulns)
 	sortVulns(outputResult.Vulnerabilities)
+}
+
+func removeVulnIntroducingPatches(patches []resolution.Difference) []resolution.Difference {
+	return slices.DeleteFunc(patches, func(diff resolution.Difference) bool { return len(diff.AddedVulns) > 0 })
 }

@@ -7,12 +7,13 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
 
-	"github.com/google/osv-scanner/internal/cachedregexp"
-	"github.com/google/osv-scanner/internal/testutility"
+	"github.com/google/osv-scanner/v2/internal/cachedregexp"
+	"github.com/google/osv-scanner/v2/internal/testutility"
 	"github.com/urfave/cli/v2"
 )
 
@@ -104,6 +105,15 @@ func normalizeErrors(t *testing.T, str string) string {
 	return str
 }
 
+func removeUntestableLines(t *testing.T, str string) string {
+	t.Helper()
+
+	replacer := regexp.MustCompile(`Image not found locally, pulling docker image .*\.\.\.\n`)
+	str = replacer.ReplaceAllLiteralString(str, "")
+
+	return str
+}
+
 // normalizeStdStream applies a series of normalizes to the buffer from a std stream like stdout and stderr
 func normalizeStdStream(t *testing.T, std *bytes.Buffer) string {
 	t.Helper()
@@ -116,6 +126,7 @@ func normalizeStdStream(t *testing.T, std *bytes.Buffer) string {
 		normalizeTempDirectory,
 		normalizeUserCacheDirectory,
 		normalizeErrors,
+		removeUntestableLines,
 	} {
 		str = normalizer(t, str)
 	}
@@ -154,7 +165,7 @@ func TestRun(t *testing.T) {
 		{
 			name: "",
 			args: []string{""},
-			exit: 128,
+			exit: 0,
 		},
 		{
 			name: "version",
@@ -762,40 +773,37 @@ func TestRun_Licenses(t *testing.T) {
 	}
 }
 
-// TODO(v2): Image scanning is not temporarily disabled
-
 func TestRun_Docker(t *testing.T) {
 	t.Parallel()
-	t.Skip("Skipping until image scanning is reenabled")
 
 	testutility.SkipIfNotAcceptanceTesting(t, "Takes a long time to pull down images")
 
 	tests := []cliTestCase{
 		{
 			name: "Fake alpine image",
-			args: []string{"", "--docker", "alpine:non-existent-tag"},
+			args: []string{"", "scan", "image", "alpine:non-existent-tag"},
 			exit: 127,
 		},
 		{
 			name: "Fake image entirely",
-			args: []string{"", "--docker", "this-image-definitely-does-not-exist-abcde"},
+			args: []string{"", "scan", "image", "this-image-definitely-does-not-exist-abcde"},
 			exit: 127,
 		},
 		// TODO: How to prevent these snapshots from changing constantly
 		{
 			name: "Real empty image",
-			args: []string{"", "--docker", "hello-world"},
+			args: []string{"", "scan", "image", "hello-world"},
 			exit: 128, // No packages found
 		},
 		{
 			name: "Real empty image with tag",
-			args: []string{"", "--docker", "hello-world:linux"},
+			args: []string{"", "scan", "image", "hello-world:linux"},
 			exit: 128, // No package found
 		},
 		{
 			name: "Real Alpine image",
-			args: []string{"", "--docker", "alpine:3.18.9"},
-			exit: 0,
+			args: []string{"", "scan", "image", "alpine:3.18.9"},
+			exit: 1,
 		},
 	}
 	for _, tt := range tests {
@@ -812,54 +820,68 @@ func TestRun_Docker(t *testing.T) {
 
 func TestRun_OCIImage(t *testing.T) {
 	t.Parallel()
-	t.Skip("Skipping until image scanning is reenabled")
 
 	testutility.SkipIfNotAcceptanceTesting(t, "Not consistent on MacOS/Windows")
 
 	tests := []cliTestCase{
 		{
 			name: "Invalid path",
-			args: []string{"", "--experimental-oci-image", "./fixtures/oci-image/no-file-here.tar"},
+			args: []string{"", "scan", "image", "--archive", "./fixtures/oci-image/no-file-here.tar"},
 			exit: 127,
 		},
 		{
 			name: "Alpine 3.10 image tar with 3.18 version file",
-			args: []string{"", "--experimental-oci-image", "../../internal/image/fixtures/test-alpine.tar"},
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-alpine.tar"},
+			exit: 1,
+		},
+		{
+			name: "Scanning python image with some packages",
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-python-full.tar"},
+			exit: 1,
+		},
+		{
+			name: "Scanning python image with no packages",
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-python-empty.tar"},
+			exit: 1,
+		},
+		{
+			name: "Scanning java image with some packages",
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-java-full.tar"},
 			exit: 1,
 		},
 		{
 			name: "scanning node_modules using npm with no packages",
-			args: []string{"", "--experimental-oci-image", "../../internal/image/fixtures/test-node_modules-npm-empty.tar"},
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-node_modules-npm-empty.tar"},
 			exit: 1,
 		},
 		{
 			name: "scanning node_modules using npm with some packages",
-			args: []string{"", "--experimental-oci-image", "../../internal/image/fixtures/test-node_modules-npm-full.tar"},
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-node_modules-npm-full.tar"},
 			exit: 1,
 		},
 		{
 			name: "scanning node_modules using yarn with no packages",
-			args: []string{"", "--experimental-oci-image", "../../internal/image/fixtures/test-node_modules-yarn-empty.tar"},
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-node_modules-yarn-empty.tar"},
 			exit: 1,
 		},
 		{
 			name: "scanning node_modules using yarn with some packages",
-			args: []string{"", "--experimental-oci-image", "../../internal/image/fixtures/test-node_modules-yarn-full.tar"},
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-node_modules-yarn-full.tar"},
 			exit: 1,
 		},
 		{
 			name: "scanning node_modules using pnpm with no packages",
-			args: []string{"", "--experimental-oci-image", "../../internal/image/fixtures/test-node_modules-pnpm-empty.tar"},
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-node_modules-pnpm-empty.tar"},
 			exit: 1,
 		},
 		{
 			name: "scanning node_modules using pnpm with some packages",
-			args: []string{"", "--experimental-oci-image", "../../internal/image/fixtures/test-node_modules-pnpm-full.tar"},
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-node_modules-pnpm-full.tar"},
 			exit: 1,
 		},
 		{
 			name: "scanning image with go binary",
-			args: []string{"", "--experimental-oci-image", "../../internal/image/fixtures/test-package-tracing.tar"},
+			args: []string{"", "scan", "image", "--archive", "../../internal/image/fixtures/test-package-tracing.tar"},
 			exit: 1,
 		},
 	}
@@ -929,22 +951,27 @@ func TestRun_InsertDefaultCommand(t *testing.T) {
 		// test when default command is specified
 		{
 			originalArgs: []string{"", "default", "file"},
-			wantArgs:     []string{"", "default", "file"},
+			wantArgs:     []string{"", "default", "source", "file"},
 		},
 		// test when command is not specified
 		{
 			originalArgs: []string{"", "file"},
-			wantArgs:     []string{"", "default", "file"},
+			wantArgs:     []string{"", "default", "source", "file"},
 		},
 		// test when command is also a filename
 		{
 			originalArgs: []string{"", "scan"}, // `scan` exists as a file on filesystem (`./cmd/osv-scanner/scan`)
 			wantArgs:     []string{"", "scan"},
 		},
+		// test when subcommand is also a filename
+		{
+			originalArgs: []string{"", "default", "image"},
+			wantArgs:     []string{"", "default", "image"},
+		},
 		// test when command is not valid
 		{
 			originalArgs: []string{"", "invalid"},
-			wantArgs:     []string{"", "default", "invalid"},
+			wantArgs:     []string{"", "default", "source", "invalid"},
 		},
 		// test when command is a built-in option
 		{
@@ -1017,6 +1044,45 @@ func TestRun_MavenTransitive(t *testing.T) {
 		},
 	}
 
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			testCli(t, tt)
+		})
+	}
+}
+
+func TestRun_MoreLockfiles(t *testing.T) {
+	t.Parallel()
+	tests := []cliTestCase{
+		{
+			name: "uv.lock",
+			args: []string{"", "-L", "./fixtures/locks-scalibr/uv.lock"},
+			exit: 0,
+		},
+		{
+			name: "depsjson",
+			args: []string{"", "-L", "deps.json:./fixtures/locks-scalibr/depsjson"},
+			exit: 1,
+		},
+		{
+			name: "cabal.project.freeze",
+			args: []string{"", "-L", "./fixtures/locks-scalibr/cabal.project.freeze"},
+			exit: 1,
+		},
+		{
+			name: "stack.yaml.lock",
+			args: []string{"", "-L", "./fixtures/locks-scalibr/stack.yaml.lock"},
+			exit: 0,
+		},
+		/*
+			{
+				name: "Package.resolved",
+				args: []string{"", "-L", "./fixtures/locks-scalibr/Package.resolved"},
+				exit: 0,
+			},
+		*/
+	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()

@@ -74,10 +74,10 @@ pkg_add osv-scanner
 Alternatively, you can install this from source by running:
 
 ```bash
-go install github.com/google/osv-scanner/cmd/osv-scanner@v1
+go install github.com/google/osv-scanner/v2/cmd/osv-scanner@latest
 ```
 
-This requires Go 1.22.7+ to be installed.
+This requires Go 1.23.5+ to be installed.
 
 ## Build from source
 

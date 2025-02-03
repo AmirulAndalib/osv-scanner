@@ -8,10 +8,10 @@ import (
 	"path"
 
 	"github.com/google/osv-scalibr/extractor"
-	"github.com/google/osv-scanner/internal/imodels"
-	"github.com/google/osv-scanner/internal/imodels/ecosystem"
-	"github.com/google/osv-scanner/pkg/models"
-	"github.com/google/osv-scanner/pkg/reporter"
+	"github.com/google/osv-scanner/v2/internal/imodels"
+	"github.com/google/osv-scanner/v2/internal/imodels/ecosystem"
+	"github.com/google/osv-scanner/v2/pkg/models"
+	"github.com/google/osv-scanner/v2/pkg/reporter"
 	"github.com/ossf/osv-schema/bindings/go/osvschema"
 )
 
@@ -77,7 +77,7 @@ func (matcher *LocalMatcher) MatchVulnerabilities(ctx context.Context, invs []*e
 			continue
 		}
 
-		results = append(results, db.VulnerabilitiesAffectingPackage(pkg))
+		results = append(results, VulnerabilitiesAffectingPackage(db.Vulnerabilities(false), pkg))
 	}
 
 	return results, nil

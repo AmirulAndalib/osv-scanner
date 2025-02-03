@@ -6,8 +6,8 @@ import (
 	"io"
 	"strings"
 
-	"github.com/google/osv-scanner/internal/utility/severity"
-	"github.com/google/osv-scanner/pkg/models"
+	"github.com/google/osv-scanner/v2/internal/utility/severity"
+	"github.com/google/osv-scanner/v2/pkg/models"
 )
 
 // HTML templates directory
@@ -25,6 +25,10 @@ func uniqueIndex(index *int) func() int {
 		*index += 1
 		return *index
 	}
+}
+
+func formatSlice(slice []string) string {
+	return strings.Join(slice, ", ")
 }
 
 func formatRating(rating severity.Rating) string {
@@ -45,6 +49,9 @@ func PrintHTMLResults(vulnResult *models.VulnerabilityResults, outputWriter io.W
 			return a + b
 		},
 		"getFilteredVulnReasons": getFilteredVulnReasons,
+		"getBaseImageName":       getBaseImageName,
+		"formatSlice":            formatSlice,
+		"formatLayerCommand":     formatLayerCommand,
 	}
 
 	tmpl := template.Must(template.New("").Funcs(funcMap).ParseFS(templates, TemplateDir))

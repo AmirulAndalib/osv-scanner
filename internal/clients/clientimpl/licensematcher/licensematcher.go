@@ -4,10 +4,10 @@ import (
 	"context"
 
 	depsdevpb "deps.dev/api/v3"
-	"github.com/google/osv-scanner/internal/depsdev"
-	"github.com/google/osv-scanner/internal/imodels"
-	"github.com/google/osv-scanner/internal/resolution/datasource"
-	"github.com/google/osv-scanner/pkg/models"
+	"github.com/google/osv-scanner/v2/internal/datasource"
+	"github.com/google/osv-scanner/v2/internal/depsdev"
+	"github.com/google/osv-scanner/v2/internal/imodels"
+	"github.com/google/osv-scanner/v2/pkg/models"
 	"golang.org/x/sync/errgroup"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -20,7 +20,7 @@ const (
 // DepsDevLicenseMatcher implements the LicenseMatcher interface with a deps.dev client.
 // It sends out requests for every package version and does not perform caching.
 type DepsDevLicenseMatcher struct {
-	Client *datasource.DepsDevAPIClient
+	Client *datasource.CachedInsightsClient
 }
 
 func (matcher *DepsDevLicenseMatcher) MatchLicenses(ctx context.Context, packages []imodels.PackageScanResult) error {
